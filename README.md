@@ -34,6 +34,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8010
 ```
 
 On startup, schema and indexes are created automatically if they do not exist.
+All DB objects used by this service are created and accessed only inside the `heroku` schema:
+- `heroku.jobs`
+- `heroku.job_invoices`
 
 ## API
 
@@ -107,3 +110,4 @@ Returns final status (`canceled` if the job was running).
 - No Celery/Redis/Kafka.
 - Workers are in-process.
 - On startup, stale jobs that were `running` longer than `STALE_RUNNING_JOB_MINUTES` are reconciled to `error` (with invoice rows marked as worker error).
+- The service does not migrate legacy `public.jobs`/`public.job_invoices` data. Existing `public` tables are left untouched.
