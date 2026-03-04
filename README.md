@@ -22,6 +22,10 @@ Edit `.env` with your values:
 - `HEROKU_API_KEY` (required)
 - `INVOICE_API_BASE_URL` (optional, defaults to Heroku endpoint)
 - `LOG_LEVEL` (optional, defaults to `INFO`)
+- `INVOICE_API_TIMEOUT_SECONDS` (optional, defaults to `20`)
+- `PDF_DOWNLOAD_TIMEOUT_SECONDS` (optional, defaults to `20`)
+- `STALE_RUNNING_JOB_MINUTES` (optional, defaults to `30`)
+- `MAX_BATCHES` (optional, defaults to `32`)
 
 ## Run
 
@@ -57,6 +61,10 @@ Response:
 {"job_id":"9f245953-c739-447c-bf47-6274f7be3282"}
 ```
 
+Notes:
+- `batches` must be between `1` and `32` (and cannot exceed `MAX_BATCHES`).
+- Duplicate `invoice_id` values in the same job are rejected.
+
 ### Get job status
 
 ```bash
@@ -71,16 +79,31 @@ curl -s http://localhost:8010/jobs/9f245953-c739-447c-bf47-6274f7be3282/results
 
 This endpoint returns `409` while the job is still running.
 
+### Cancel job
+
+```bash
+curl -s -X POST http://localhost:8010/jobs/9f245953-c739-447c-bf47-6274f7be3282/cancel
+```
+
+Returns final status (`canceled` if the job was running).
+
 ## Processing behavior
 
 - One background thread starts per job.
 - Inside each job, `ThreadPoolExecutor(max_workers=batches)` runs one worker per batch.
-- Each invoice is retried up to 3 attempts for transient errors.
+- Invoice rows are claimed atomically (`UPDATE ... WHERE status='queued' RETURNING ...`), one at a time per batch worker.
+- Each invoice is retried up to 3 attempts for:
+  - network errors
+  - invoice API HTTP codes `401/403/404/423` (explicit business rule)
+  - PDF download failures
+  - empty PDF extraction
+- Results persist `matched_phrases`, `pdf_url`, and `last_error` for traceability.
 - If any invoice ends in `error`, the job final status is `error`.
+- Jobs can end as `finished`, `error`, or `canceled`.
 
 ## Notes
 
 - Implementation is intentionally simple: explicit SQL + `psycopg2` connection pool.
 - No Celery/Redis/Kafka.
-- Workers are in-process; if the server process restarts, active jobs are not resumed automatically.
-
+- Workers are in-process.
+- On startup, stale jobs that were `running` longer than `STALE_RUNNING_JOB_MINUTES` are reconciled to `error` (with invoice rows marked as worker error).

@@ -8,9 +8,10 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.main import JobCreateRequest, create_job, get_job, get_job_results
+from app.main import JobCreateRequest, cancel_job, create_job, get_job, get_job_results
 from app.sql import (
-    INSERT_JOB_INVOICE_SQL,
+    CANCEL_JOB_INVOICES_SQL,
+    CANCEL_JOB_SQL,
     INSERT_JOB_SQL,
     SELECT_JOB_RESULTS_SQL,
     SELECT_JOB_STATUS_SQL,
@@ -23,7 +24,6 @@ class FakeCursor:
         self.fetchone_values = list(fetchone_values or [])
         self.fetchall_values = list(fetchall_values or [])
         self.executed = []
-        self.executemany_calls = []
 
     def __enter__(self):
         return self
@@ -33,9 +33,6 @@ class FakeCursor:
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
-
-    def executemany(self, sql, seq):
-        self.executemany_calls.append((sql, list(seq)))
 
     def fetchone(self):
         return self.fetchone_values.pop(0) if self.fetchone_values else None
@@ -84,15 +81,18 @@ class FakeThread:
         self.started = True
 
 
-def build_request(fake_db: FakeDB) -> SimpleNamespace:
+def build_request(fake_db: FakeDB, max_batches: int = 32) -> SimpleNamespace:
     settings = Settings(
         database_url="postgresql://x",
         heroku_api_key="token",
         invoice_api_base_url="https://base/",
         log_level="INFO",
-        request_timeout_seconds=20,
+        invoice_api_timeout_seconds=20,
+        pdf_download_timeout_seconds=20,
         db_pool_minconn=1,
         db_pool_maxconn=20,
+        stale_running_job_minutes=30,
+        max_batches=max_batches,
     )
     app = SimpleNamespace(state=SimpleNamespace(db=fake_db, settings=settings))
     return SimpleNamespace(app=app)
@@ -108,13 +108,35 @@ def test_job_request_validation_errors():
     with pytest.raises(ValidationError):
         JobCreateRequest.model_validate({"phrases": ["ok"], "batches": 0, "invoices": ["1"]})
 
+    with pytest.raises(ValidationError):
+        JobCreateRequest.model_validate({"phrases": ["ok"], "batches": 33, "invoices": ["1"]})
 
-def test_create_job_inserts_rows_splits_batches_and_starts_thread(monkeypatch: pytest.MonkeyPatch):
+    with pytest.raises(ValidationError):
+        JobCreateRequest.model_validate(
+            {"phrases": ["ok"], "batches": 1, "invoices": ["1", "1"]}
+        )
+
+
+def test_create_job_inserts_job_and_starts_thread(monkeypatch: pytest.MonkeyPatch):
     from app import main
 
     FakeThread.instances = []
     monkeypatch.setattr(main, "Thread", FakeThread)
     monkeypatch.setattr(main, "uuid4", lambda: UUID("11111111-1111-1111-1111-111111111111"))
+
+    insert_calls = []
+
+    def fake_insert_job_invoices(cur, job_id, invoices, batches, chunk_size=5000):
+        insert_calls.append(
+            {
+                "job_id": job_id,
+                "invoices": invoices,
+                "batches": batches,
+                "chunk_size": chunk_size,
+            }
+        )
+
+    monkeypatch.setattr(main, "_insert_job_invoices", fake_insert_job_invoices)
 
     cursor = FakeCursor()
     conn = FakeConn(cursor)
@@ -131,21 +153,15 @@ def test_create_job_inserts_rows_splits_batches_and_starts_thread(monkeypatch: p
     assert response.job_id == "11111111-1111-1111-1111-111111111111"
     assert conn.commit_count == 1
     assert conn.rollback_count == 0
-
     assert len(cursor.executed) == 1
     assert cursor.executed[0][0] == INSERT_JOB_SQL
-    assert cursor.executed[0][1][0] == "11111111-1111-1111-1111-111111111111"
-    assert cursor.executed[0][1][1] == 3
-    assert cursor.executed[0][1][3] == 4
-
-    assert len(cursor.executemany_calls) == 1
-    sql, rows = cursor.executemany_calls[0]
-    assert sql == INSERT_JOB_INVOICE_SQL
-    assert rows == [
-        ("11111111-1111-1111-1111-111111111111", "100", 0),
-        ("11111111-1111-1111-1111-111111111111", "200", 1),
-        ("11111111-1111-1111-1111-111111111111", "300", 2),
-        ("11111111-1111-1111-1111-111111111111", "400", 0),
+    assert insert_calls == [
+        {
+            "job_id": "11111111-1111-1111-1111-111111111111",
+            "invoices": ["100", "200", "300", "400"],
+            "batches": 3,
+            "chunk_size": 5000,
+        }
     ]
 
     assert len(FakeThread.instances) == 1
@@ -153,6 +169,54 @@ def test_create_job_inserts_rows_splits_batches_and_starts_thread(monkeypatch: p
     assert thread.daemon is True
     assert thread.started is True
     assert thread.args[0] == "11111111-1111-1111-1111-111111111111"
+
+
+def test_create_job_rejects_batches_above_configured_cap(monkeypatch: pytest.MonkeyPatch):
+    from app import main
+
+    monkeypatch.setattr(main, "Thread", FakeThread)
+    cursor = FakeCursor()
+    conn = FakeConn(cursor)
+    request = build_request(FakeDB(conn), max_batches=8)
+
+    payload = JobCreateRequest(
+        phrases=["A"],
+        batches=9,
+        invoices=["100"],
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        create_job(payload, request)
+
+    assert exc.value.status_code == 422
+    assert "batches must be <=" in exc.value.detail
+
+
+def test_cancel_job_changes_running_job_to_canceled():
+    cursor = FakeCursor(fetchone_values=[{"job_id": "job-1", "status": "running"}])
+    conn = FakeConn(cursor)
+    request = build_request(FakeDB(conn))
+
+    response = cancel_job("job-1", request)
+
+    assert response.job_id == "job-1"
+    assert response.status == "canceled"
+    assert conn.commit_count == 1
+    assert cursor.executed[0][0] == SELECT_JOB_STATUS_SQL
+    assert cursor.executed[1][0] == CANCEL_JOB_SQL
+    assert cursor.executed[2][0] == CANCEL_JOB_INVOICES_SQL
+
+
+def test_cancel_job_is_idempotent_for_finished_job():
+    cursor = FakeCursor(fetchone_values=[{"job_id": "job-1", "status": "finished"}])
+    conn = FakeConn(cursor)
+    request = build_request(FakeDB(conn))
+
+    response = cancel_job("job-1", request)
+
+    assert response.status == "finished"
+    assert conn.commit_count == 1
+    assert len(cursor.executed) == 1
 
 
 def test_get_job_returns_status_and_counters():
@@ -170,6 +234,7 @@ def test_get_job_returns_status_and_counters():
                 "running": 2,
                 "finished": 4,
                 "error": 1,
+                "canceled": 0,
             }
         ]
     )
@@ -186,6 +251,7 @@ def test_get_job_returns_status_and_counters():
     assert data["running"] == 2
     assert data["finished"] == 4
     assert data["error"] == 1
+    assert data["canceled"] == 0
 
 
 def test_get_job_not_found():
@@ -212,10 +278,10 @@ def test_get_job_results_returns_409_while_running():
     assert exc.value.detail == "job_not_finished"
 
 
-def test_get_job_results_returns_rows_when_finished():
+def test_get_job_results_returns_rows_when_canceled():
     now = datetime.now(timezone.utc)
     cursor = FakeCursor(
-        fetchone_values=[{"job_id": "job-1", "status": "finished"}],
+        fetchone_values=[{"job_id": "job-1", "status": "canceled"}],
         fetchall_values=[
             [
                 {
@@ -226,16 +292,22 @@ def test_get_job_results_returns_rows_when_finished():
                     "result_label": "notificado",
                     "error_code": None,
                     "attempts": 1,
+                    "matched_phrases": ["token"],
+                    "pdf_url": "https://pdf",
+                    "last_error": None,
                     "updated_at": now,
                 },
                 {
                     "invoice_id": "200",
                     "batch_id": 1,
-                    "status": "error",
+                    "status": "canceled",
                     "found": None,
-                    "result_label": "erro_401",
-                    "error_code": 401,
-                    "attempts": 3,
+                    "result_label": "cancelado",
+                    "error_code": None,
+                    "attempts": 1,
+                    "matched_phrases": None,
+                    "pdf_url": None,
+                    "last_error": "canceled_by_user",
                     "updated_at": now,
                 },
             ]
@@ -249,8 +321,8 @@ def test_get_job_results_returns_rows_when_finished():
     assert cursor.executed[0][0] == SELECT_JOB_STATUS_SQL
     assert cursor.executed[1][0] == SELECT_JOB_RESULTS_SQL
     assert response["job_id"] == "job-1"
-    assert response["status"] == "finished"
+    assert response["status"] == "canceled"
     assert len(response["results"]) == 2
-    assert response["results"][0]["result_label"] == "notificado"
-    assert response["results"][1]["result_label"] == "erro_401"
+    assert response["results"][0]["matched_phrases"] == ["token"]
+    assert response["results"][1]["last_error"] == "canceled_by_user"
 

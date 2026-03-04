@@ -60,6 +60,9 @@ def test_buscar_fatura_found_phrase(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["found"] is True
     assert result["result_label"] == "notificado"
     assert result["attempts"] == 1
+    assert result["matched_phrases"] == ["notificado"]
+    assert result["pdf_url"] == "https://example.com/invoice.pdf"
+    assert result["last_error"] is None
 
 
 def test_buscar_fatura_phrase_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,6 +89,8 @@ def test_buscar_fatura_phrase_not_found(monkeypatch: pytest.MonkeyPatch) -> None
     assert result["status"] == "finished"
     assert result["found"] is False
     assert result["result_label"] == "nao_notificado"
+    assert result["matched_phrases"] == []
+    assert result["pdf_url"] == "https://example.com/invoice.pdf"
 
 
 def test_buscar_fatura_sem_fatura_when_url_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,6 +113,9 @@ def test_buscar_fatura_sem_fatura_when_url_missing(monkeypatch: pytest.MonkeyPat
         "found": None,
         "result_label": "sem_fatura",
         "error_code": None,
+        "matched_phrases": None,
+        "pdf_url": None,
+        "last_error": "invoice_api_response_missing_url",
         "attempts": 1,
     }
 
@@ -133,6 +141,9 @@ def test_buscar_fatura_retryable_http_exhausted(monkeypatch: pytest.MonkeyPatch)
         "found": None,
         "result_label": "erro_401",
         "error_code": 401,
+        "matched_phrases": None,
+        "pdf_url": None,
+        "last_error": "invoice_api_http_error_401",
         "attempts": 3,
     }
 
@@ -166,6 +177,7 @@ def test_buscar_fatura_network_then_success(monkeypatch: pytest.MonkeyPatch) -> 
     assert result["status"] == "finished"
     assert result["found"] is True
     assert result["attempts"] == 2
+    assert result["matched_phrases"] == ["chave"]
 
 
 def test_buscar_fatura_pdf_parse_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -195,6 +207,38 @@ def test_buscar_fatura_pdf_parse_exhausted(monkeypatch: pytest.MonkeyPatch) -> N
         "found": None,
         "result_label": "erro_pdf",
         "error_code": None,
+        "matched_phrases": None,
+        "pdf_url": "https://example.com/invoice.pdf",
+        "last_error": "pdf_text_empty_after_retries",
         "attempts": 3,
     }
 
+
+def test_buscar_fatura_uses_independent_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {"invoice_timeout": None, "pdf_timeout": None}
+
+    def fake_request_invoice_api(**kwargs):
+        captured["invoice_timeout"] = kwargs["timeout"]
+        return DummyResponse(200, {"url": "https://example.com/invoice.pdf"})
+
+    def fake_pdf_get(*_args, **kwargs):
+        captured["pdf_timeout"] = kwargs.get("timeout")
+        return DummyResponse(200, content=b"%PDF")
+
+    monkeypatch.setattr(invoice_search, "sleep", lambda _: None)
+    monkeypatch.setattr(invoice_search, "request_invoice_api", fake_request_invoice_api)
+    monkeypatch.setattr(invoice_search.requests, "get", fake_pdf_get)
+    monkeypatch.setattr(invoice_search, "pdf_to_text", lambda *_args, **_kwargs: "ok")
+
+    result = invoice_search.buscar_fatura(
+        invoice_id="123",
+        phrases=["ok"],
+        base_url="https://base/",
+        api_key="token",
+        invoice_api_timeout=13,
+        pdf_download_timeout=17,
+    )
+
+    assert result["status"] == "finished"
+    assert captured["invoice_timeout"] == 13
+    assert captured["pdf_timeout"] == 17

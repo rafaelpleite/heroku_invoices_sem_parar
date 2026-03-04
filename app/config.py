@@ -10,9 +10,12 @@ class Settings:
     heroku_api_key: str
     invoice_api_base_url: str
     log_level: str
-    request_timeout_seconds: int
+    invoice_api_timeout_seconds: int
+    pdf_download_timeout_seconds: int
     db_pool_minconn: int
     db_pool_maxconn: int
+    stale_running_job_minutes: int
+    max_batches: int
 
 
 def load_settings() -> Settings:
@@ -25,6 +28,10 @@ def load_settings() -> Settings:
         "https://semparar-production.herokuapp.com/api/v1/invoices/",
     ).strip()
     log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+    invoice_api_timeout_seconds = int(os.getenv("INVOICE_API_TIMEOUT_SECONDS", "20"))
+    pdf_download_timeout_seconds = int(os.getenv("PDF_DOWNLOAD_TIMEOUT_SECONDS", "20"))
+    stale_running_job_minutes = int(os.getenv("STALE_RUNNING_JOB_MINUTES", "30"))
+    max_batches = int(os.getenv("MAX_BATCHES", "32"))
 
     if not database_url:
         raise RuntimeError("Missing required environment variable: DATABASE_URL")
@@ -39,8 +46,10 @@ def load_settings() -> Settings:
         heroku_api_key=heroku_api_key,
         invoice_api_base_url=invoice_api_base_url,
         log_level=log_level or "INFO",
-        request_timeout_seconds=20,
+        invoice_api_timeout_seconds=max(1, invoice_api_timeout_seconds),
+        pdf_download_timeout_seconds=max(1, pdf_download_timeout_seconds),
         db_pool_minconn=1,
         db_pool_maxconn=20,
+        stale_running_job_minutes=max(1, stale_running_job_minutes),
+        max_batches=max(1, max_batches),
     )
-

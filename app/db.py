@@ -1,9 +1,10 @@
 from contextlib import contextmanager
 from typing import Generator
 
+from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 
-from app.sql import SCHEMA_STATEMENTS
+from app.sql import MARK_STALE_JOB_INVOICES_SQL, MARK_STALE_RUNNING_JOBS_SQL, SCHEMA_STATEMENTS
 
 
 class Database:
@@ -49,3 +50,18 @@ class Database:
                 conn.rollback()
                 raise
 
+    def reconcile_stale_running_jobs(self, stale_minutes: int) -> int:
+        with self.get_conn() as conn:
+            try:
+                stale_job_ids: list[str] = []
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(MARK_STALE_RUNNING_JOBS_SQL, (stale_minutes,))
+                    rows = cur.fetchall()
+                    stale_job_ids = [str(row["job_id"]) for row in rows]
+                    for job_id in stale_job_ids:
+                        cur.execute(MARK_STALE_JOB_INVOICES_SQL, (job_id,))
+                conn.commit()
+                return len(stale_job_ids)
+            except Exception:
+                conn.rollback()
+                raise

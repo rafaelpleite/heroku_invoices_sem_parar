@@ -52,22 +52,28 @@ def buscar_fatura(
     phrases: list[str],
     base_url: str,
     api_key: str,
-    timeout: int = 20,
+    invoice_api_timeout: int = 20,
+    pdf_download_timeout: int = 20,
     max_attempts: int = 3,
     max_pages: int | None = 3,
     logger: logging.Logger | None = None,
     log_context: str = "",
 ) -> dict[str, Any]:
     logger = logger or logging.getLogger(__name__)
-    normalized_phrases = [normalize(phrase) for phrase in phrases if normalize(phrase)]
+    phrase_pairs: list[tuple[str, str]] = []
+    for phrase in phrases:
+        normalized = normalize(phrase)
+        if normalized:
+            phrase_pairs.append((phrase, normalized))
 
     for attempt in range(1, max_attempts + 1):
+        pdf_url: str | None = None
         try:
             invoice_response = request_invoice_api(
                 invoice_id=invoice_id,
                 base_url=base_url,
                 api_key=api_key,
-                timeout=timeout,
+                timeout=invoice_api_timeout,
             )
         except RequestException as exc:
             logger.warning(
@@ -83,6 +89,9 @@ def buscar_fatura(
                     "found": None,
                     "result_label": "erro_rede",
                     "error_code": None,
+                    "matched_phrases": None,
+                    "pdf_url": None,
+                    "last_error": f"invoice_api_network_error: {exc}",
                     "attempts": attempt,
                 }
             sleep(2 * attempt)
@@ -101,9 +110,14 @@ def buscar_fatura(
                     "found": None,
                     "result_label": "sem_fatura",
                     "error_code": None,
+                    "matched_phrases": None,
+                    "pdf_url": None,
+                    "last_error": "invoice_api_response_missing_url",
                     "attempts": attempt,
                 }
+            pdf_url = str(pdf_url)
         elif status_code in RETRYABLE_HTTP_CODES:
+            # Business rule: these status codes are retried even though they are often non-transient.
             logger.warning(
                 "%s invoice_id=%s attempt=%s retryable_http=%s",
                 log_context,
@@ -117,6 +131,9 @@ def buscar_fatura(
                     "found": None,
                     "result_label": f"erro_{status_code}",
                     "error_code": status_code,
+                    "matched_phrases": None,
+                    "pdf_url": None,
+                    "last_error": f"invoice_api_http_error_{status_code}",
                     "attempts": attempt,
                 }
             sleep(2 * attempt)
@@ -127,11 +144,14 @@ def buscar_fatura(
                 "found": None,
                 "result_label": "sem_fatura",
                 "error_code": None,
+                "matched_phrases": None,
+                "pdf_url": None,
+                "last_error": f"invoice_api_non_retryable_http_{status_code}",
                 "attempts": attempt,
             }
 
         try:
-            pdf_response = requests.get(pdf_url, timeout=timeout, verify=False)
+            pdf_response = requests.get(pdf_url, timeout=pdf_download_timeout, verify=False)
         except RequestException as exc:
             logger.warning(
                 "%s invoice_id=%s attempt=%s pdf_download_error=%s",
@@ -146,6 +166,9 @@ def buscar_fatura(
                     "found": None,
                     "result_label": "erro_rede",
                     "error_code": None,
+                    "matched_phrases": None,
+                    "pdf_url": pdf_url,
+                    "last_error": f"pdf_download_network_error: {exc}",
                     "attempts": attempt,
                 }
             sleep(2 * attempt)
@@ -165,6 +188,9 @@ def buscar_fatura(
                     "found": None,
                     "result_label": "erro_rede",
                     "error_code": pdf_response.status_code,
+                    "matched_phrases": None,
+                    "pdf_url": pdf_url,
+                    "last_error": f"pdf_download_http_error_{pdf_response.status_code}",
                     "attempts": attempt,
                 }
             sleep(2 * attempt)
@@ -184,18 +210,29 @@ def buscar_fatura(
                     "found": None,
                     "result_label": "erro_pdf",
                     "error_code": None,
+                    "matched_phrases": None,
+                    "pdf_url": pdf_url,
+                    "last_error": "pdf_text_empty_after_retries",
                     "attempts": attempt,
                 }
             sleep(2 * attempt)
             continue
 
         normalized_pdf = normalize(extracted_text)
-        found = any(phrase in normalized_pdf for phrase in normalized_phrases)
+        matched_phrases = [
+            original_phrase
+            for original_phrase, normalized_phrase in phrase_pairs
+            if normalized_phrase in normalized_pdf
+        ]
+        found = bool(matched_phrases)
         return {
             "status": "finished",
             "found": found,
             "result_label": "notificado" if found else "nao_notificado",
             "error_code": None,
+            "matched_phrases": matched_phrases,
+            "pdf_url": pdf_url,
+            "last_error": None,
             "attempts": attempt,
         }
 
@@ -204,6 +241,8 @@ def buscar_fatura(
         "found": None,
         "result_label": "erro_rede",
         "error_code": None,
+        "matched_phrases": None,
+        "pdf_url": None,
+        "last_error": "unexpected_retry_exit",
         "attempts": max_attempts,
     }
-
