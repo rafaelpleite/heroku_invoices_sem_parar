@@ -1,4 +1,5 @@
 import logging
+from hmac import compare_digest
 from contextlib import asynccontextmanager
 from threading import Thread
 from typing import Any
@@ -121,8 +122,27 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def require_api_bearer(request: Request) -> None:
+    settings: Settings = request.app.state.settings
+    authorization = request.headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme != "Bearer" or not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not compare_digest(token, settings.api_bearer_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 @app.post("/jobs", response_model=JobCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_job(payload: JobCreateRequest, request: Request) -> JobCreateResponse:
+    require_api_bearer(request)
     db: Database = request.app.state.db
     settings: Settings = request.app.state.settings
     if payload.batches > settings.max_batches:
@@ -181,6 +201,7 @@ def create_job(payload: JobCreateRequest, request: Request) -> JobCreateResponse
 
 @app.post("/jobs/{job_id}/cancel", response_model=JobCancelResponse)
 def cancel_job(job_id: str, request: Request) -> JobCancelResponse:
+    require_api_bearer(request)
     db: Database = request.app.state.db
     with db.get_conn() as conn:
         try:
@@ -217,6 +238,7 @@ def cancel_job(job_id: str, request: Request) -> JobCancelResponse:
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str, request: Request) -> dict[str, Any]:
+    require_api_bearer(request)
     db: Database = request.app.state.db
     with db.get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -243,6 +265,7 @@ def get_job(job_id: str, request: Request) -> dict[str, Any]:
 
 @app.get("/jobs/{job_id}/results")
 def get_job_results(job_id: str, request: Request) -> dict[str, Any]:
+    require_api_bearer(request)
     db: Database = request.app.state.db
     with db.get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:

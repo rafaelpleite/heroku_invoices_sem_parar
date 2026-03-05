@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 @dataclass(frozen=True)
 class Settings:
     database_url: str
+    api_bearer_key: str
     heroku_api_key: str
     invoice_api_base_url: str
     log_level: str
@@ -52,6 +53,7 @@ def load_settings() -> Settings:
     load_dotenv()
 
     raw_database_url = os.getenv("DATABASE_URL", "").strip()
+    api_bearer_key = os.getenv("API_BEARER_KEY", "").strip()
     heroku_api_key = os.getenv("HEROKU_API_KEY", "").strip()
     invoice_api_base_url = os.getenv(
         "INVOICE_API_BASE_URL",
@@ -67,6 +69,8 @@ def load_settings() -> Settings:
 
     if not raw_database_url:
         raise RuntimeError("Missing required environment variable: DATABASE_URL")
+    if not api_bearer_key:
+        raise RuntimeError("Missing required environment variable: API_BEARER_KEY")
     if not heroku_api_key:
         raise RuntimeError("Missing required environment variable: HEROKU_API_KEY")
 
@@ -77,6 +81,7 @@ def load_settings() -> Settings:
 
     return Settings(
         database_url=database_url,
+        api_bearer_key=api_bearer_key,
         heroku_api_key=heroku_api_key,
         invoice_api_base_url=invoice_api_base_url,
         log_level=log_level or "INFO",

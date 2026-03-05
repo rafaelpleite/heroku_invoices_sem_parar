@@ -19,6 +19,7 @@ cp .env.example .env
 Edit `.env` with your values:
 
 - `DATABASE_URL` (required)
+- `API_BEARER_KEY` (required, protects all `/jobs*` endpoints)
 - `HEROKU_API_KEY` (required)
 - `INVOICE_API_BASE_URL` (optional, defaults to Heroku endpoint)
 - `LOG_LEVEL` (optional, defaults to `INFO`)
@@ -26,11 +27,33 @@ Edit `.env` with your values:
 - `PDF_DOWNLOAD_TIMEOUT_SECONDS` (optional, defaults to `20`)
 - `STALE_RUNNING_JOB_MINUTES` (optional, defaults to `30`)
 - `MAX_BATCHES` (optional, defaults to `32`)
+- `INVOICE_DEBUG_LOGS` (optional, defaults to `false`)
+- `INVOICE_DEBUG_BODY_LIMIT` (optional, defaults to `300`)
 
 Accepted `DATABASE_URL` formats:
 - `postgresql://...` (canonical)
 - `postgresql+psycopg2://...` (auto-normalized)
 - `postgres://...` (auto-normalized)
+
+Generate a strong API Bearer key directly in your terminal and write it to `.env`:
+
+```bash
+python - <<'PY'
+import pathlib, re, secrets
+env_path = pathlib.Path(".env")
+text = env_path.read_text() if env_path.exists() else ""
+key = secrets.token_urlsafe(48)
+line = f"API_BEARER_KEY={key}"
+if re.search(r"^API_BEARER_KEY=.*$", text, flags=re.M):
+    text = re.sub(r"^API_BEARER_KEY=.*$", line, text, flags=re.M)
+else:
+    text += ("" if text.endswith("\n") or not text else "\n") + line + "\n"
+env_path.write_text(text)
+print("API_BEARER_KEY saved to .env")
+PY
+```
+
+Use HTTPS in production so Bearer tokens are never sent over plain HTTP.
 
 ## Run
 
@@ -51,11 +74,25 @@ All DB objects used by this service are created and accessed only inside the `he
 curl -s http://localhost:8010/health
 ```
 
+### Authentication
+
+All `/jobs*` endpoints require:
+
+```bash
+-H "Authorization: Bearer $API_BEARER_KEY"
+```
+
+Invalid or missing token returns:
+- `401`
+- `{"detail":"unauthorized"}`
+- `WWW-Authenticate: Bearer`
+
 ### Create job
 
 ```bash
 curl -s -X POST http://localhost:8010/jobs \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_BEARER_KEY" \
   -d '{
     "phrases": ["foo", "bar baz"],
     "batches": 4,
@@ -76,13 +113,15 @@ Notes:
 ### Get job status
 
 ```bash
-curl -s http://localhost:8010/jobs/9f245953-c739-447c-bf47-6274f7be3282
+curl -s http://localhost:8010/jobs/9f245953-c739-447c-bf47-6274f7be3282 \
+  -H "Authorization: Bearer $API_BEARER_KEY"
 ```
 
 ### Get job results
 
 ```bash
-curl -s http://localhost:8010/jobs/9f245953-c739-447c-bf47-6274f7be3282/results
+curl -s http://localhost:8010/jobs/9f245953-c739-447c-bf47-6274f7be3282/results \
+  -H "Authorization: Bearer $API_BEARER_KEY"
 ```
 
 This endpoint returns `409` while the job is still running.
@@ -90,7 +129,8 @@ This endpoint returns `409` while the job is still running.
 ### Cancel job
 
 ```bash
-curl -s -X POST http://localhost:8010/jobs/9f245953-c739-447c-bf47-6274f7be3282/cancel
+curl -s -X POST http://localhost:8010/jobs/9f245953-c739-447c-bf47-6274f7be3282/cancel \
+  -H "Authorization: Bearer $API_BEARER_KEY"
 ```
 
 Returns final status (`canceled` if the job was running).

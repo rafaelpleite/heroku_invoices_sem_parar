@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from psycopg2 import InterfaceError, OperationalError
 
 from app.config import Settings
-from app.main import JobCreateRequest, cancel_job, create_job, get_job, get_job_results
+from app.main import JobCreateRequest, cancel_job, create_job, get_job, get_job_results, health
 from app.sql import (
     CANCEL_JOB_INVOICES_SQL,
     CANCEL_JOB_SQL,
@@ -100,9 +100,14 @@ class FakeThread:
         self.started = True
 
 
-def build_request(fake_db: FakeDB, max_batches: int = 32) -> SimpleNamespace:
+def build_request(
+    fake_db: FakeDB,
+    max_batches: int = 32,
+    authorization: str | None = "Bearer api-test-key",
+) -> SimpleNamespace:
     settings = Settings(
         database_url="postgresql://x",
+        api_bearer_key="api-test-key",
         heroku_api_key="token",
         invoice_api_base_url="https://base/",
         log_level="INFO",
@@ -116,7 +121,90 @@ def build_request(fake_db: FakeDB, max_batches: int = 32) -> SimpleNamespace:
         invoice_debug_body_limit=300,
     )
     app = SimpleNamespace(state=SimpleNamespace(db=fake_db, settings=settings))
-    return SimpleNamespace(app=app)
+    headers = {}
+    if authorization is not None:
+        headers["authorization"] = authorization
+    return SimpleNamespace(app=app, headers=headers)
+
+
+def test_health_is_public() -> None:
+    assert health() == {"status": "ok"}
+
+
+def test_create_job_rejects_missing_authorization() -> None:
+    cursor = FakeCursor()
+    conn = FakeConn(cursor)
+    request = build_request(FakeDB(conn), authorization=None)
+    payload = JobCreateRequest(phrases=["A"], batches=1, invoices=["100"])
+
+    with pytest.raises(HTTPException) as exc:
+        create_job(payload, request)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "unauthorized"
+    assert exc.value.headers == {"WWW-Authenticate": "Bearer"}
+
+
+def test_create_job_rejects_malformed_authorization() -> None:
+    cursor = FakeCursor()
+    conn = FakeConn(cursor)
+    request = build_request(FakeDB(conn), authorization="Token api-test-key")
+    payload = JobCreateRequest(phrases=["A"], batches=1, invoices=["100"])
+
+    with pytest.raises(HTTPException) as exc:
+        create_job(payload, request)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "unauthorized"
+
+
+def test_create_job_rejects_wrong_bearer_token() -> None:
+    cursor = FakeCursor()
+    conn = FakeConn(cursor)
+    request = build_request(FakeDB(conn), authorization="Bearer wrong-key")
+    payload = JobCreateRequest(phrases=["A"], batches=1, invoices=["100"])
+
+    with pytest.raises(HTTPException) as exc:
+        create_job(payload, request)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "unauthorized"
+
+
+def test_get_job_rejects_missing_authorization() -> None:
+    cursor = FakeCursor()
+    conn = FakeConn(cursor)
+    request = build_request(FakeDB(conn), authorization=None)
+
+    with pytest.raises(HTTPException) as exc:
+        get_job("job-1", request)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "unauthorized"
+
+
+def test_get_job_results_rejects_wrong_bearer_token() -> None:
+    cursor = FakeCursor()
+    conn = FakeConn(cursor)
+    request = build_request(FakeDB(conn), authorization="Bearer wrong-key")
+
+    with pytest.raises(HTTPException) as exc:
+        get_job_results("job-1", request)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "unauthorized"
+
+
+def test_cancel_job_rejects_malformed_authorization() -> None:
+    cursor = FakeCursor()
+    conn = FakeConn(cursor)
+    request = build_request(FakeDB(conn), authorization="Token api-test-key")
+
+    with pytest.raises(HTTPException) as exc:
+        cancel_job("job-1", request)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "unauthorized"
 
 
 def test_job_request_validation_errors():
