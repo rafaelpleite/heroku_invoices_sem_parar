@@ -142,7 +142,8 @@ Returns final status (`canceled` if the job was running).
 - Invoice rows are claimed atomically (`UPDATE ... WHERE status='queued' RETURNING ...`), one at a time per batch worker.
 - Each invoice is retried up to 3 attempts for:
   - network errors
-  - invoice API HTTP codes `401/403/404/423` (explicit business rule)
+  - invoice API HTTP codes `401/403/423` (explicit business rule)
+  - HTTP `404` is not retried and is classified immediately as `erro_404`
   - PDF download failures
   - empty PDF extraction
 - Results persist `matched_phrases`, `pdf_url`, and `last_error` for traceability.

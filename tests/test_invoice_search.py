@@ -179,6 +179,35 @@ def test_buscar_fatura_retryable_http_exhausted(monkeypatch: pytest.MonkeyPatch)
     assert result["last_error"].startswith("invoice_api_http_error_401")
 
 
+def test_buscar_fatura_404_is_error_and_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = {"calls": 0}
+
+    def fake_request_invoice_api(**_kwargs):
+        state["calls"] += 1
+        return DummyResponse(404, text='{"result":"Not Found"}')
+
+    monkeypatch.setattr(invoice_search, "sleep", lambda _: None)
+    monkeypatch.setattr(invoice_search, "request_invoice_api", fake_request_invoice_api)
+
+    result = invoice_search.buscar_fatura(
+        invoice_id="missing-invoice",
+        phrases=["abc"],
+        base_url="https://base/",
+        api_key="token",
+        max_attempts=3,
+    )
+
+    assert state["calls"] == 1
+    assert result["status"] == "error"
+    assert result["found"] is None
+    assert result["result_label"] == "erro_404"
+    assert result["error_code"] == 404
+    assert result["matched_phrases"] is None
+    assert result["pdf_url"] is None
+    assert result["attempts"] == 1
+    assert result["last_error"].startswith("invoice_api_http_error_404")
+
+
 def test_buscar_fatura_network_then_success(monkeypatch: pytest.MonkeyPatch) -> None:
     state = {"calls": 0}
 

@@ -12,7 +12,7 @@ from urllib3.exceptions import InsecureRequestWarning
 
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
-RETRYABLE_HTTP_CODES = {401, 403, 404, 423}
+RETRYABLE_HTTP_CODES = {401, 403, 423}
 
 
 def normalize(text: str) -> str:
@@ -172,6 +172,31 @@ def buscar_fatura(
                     "attempts": attempt,
                 }
             pdf_url = str(pdf_url)
+        elif status_code == 404:
+            logger.warning(
+                "%s invoice_id=%s attempt=%s non_retryable_http=%s",
+                log_context,
+                invoice_id,
+                attempt,
+                status_code,
+            )
+            detailed_error = _build_invoice_api_error(
+                status_code=status_code,
+                endpoint=endpoint,
+                www_authenticate=www_authenticate,
+                response_body=getattr(invoice_response, "text", ""),
+                limit=debug_body_limit,
+            )
+            return {
+                "status": "error",
+                "found": None,
+                "result_label": "erro_404",
+                "error_code": 404,
+                "matched_phrases": None,
+                "pdf_url": None,
+                "last_error": detailed_error,
+                "attempts": attempt,
+            }
         elif status_code in RETRYABLE_HTTP_CODES:
             # Business rule: these status codes are retried even though they are often non-transient.
             logger.warning(
