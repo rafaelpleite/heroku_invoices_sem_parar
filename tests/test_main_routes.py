@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from psycopg2 import InterfaceError, OperationalError
 
 from app.config import Settings
 from app.main import JobCreateRequest, cancel_job, create_job, get_job, get_job_results
@@ -20,10 +21,11 @@ from app.sql import (
 
 
 class FakeCursor:
-    def __init__(self, fetchone_values=None, fetchall_values=None):
+    def __init__(self, fetchone_values=None, fetchall_values=None, execute_exception=None):
         self.fetchone_values = list(fetchone_values or [])
         self.fetchall_values = list(fetchall_values or [])
         self.executed = []
+        self.execute_exception = execute_exception
 
     def __enter__(self):
         return self
@@ -32,6 +34,8 @@ class FakeCursor:
         return False
 
     def execute(self, sql, params=None):
+        if self.execute_exception is not None:
+            raise self.execute_exception
         self.executed.append((sql, params))
 
     def fetchone(self):
@@ -42,10 +46,11 @@ class FakeCursor:
 
 
 class FakeConn:
-    def __init__(self, cursor: FakeCursor):
+    def __init__(self, cursor: FakeCursor, rollback_exception: Exception | None = None):
         self._cursor = cursor
         self.commit_count = 0
         self.rollback_count = 0
+        self.rollback_exception = rollback_exception
 
     def cursor(self, cursor_factory=None):
         return self._cursor
@@ -55,15 +60,29 @@ class FakeConn:
 
     def rollback(self):
         self.rollback_count += 1
+        if self.rollback_exception is not None:
+            raise self.rollback_exception
 
 
 class FakeDB:
     def __init__(self, conn: FakeConn):
         self._conn = conn
+        self.safe_rollback_count = 0
 
     @contextmanager
     def get_conn(self):
         yield self._conn
+
+    def safe_rollback(self, conn):
+        self.safe_rollback_count += 1
+        try:
+            conn.rollback()
+        except Exception:
+            return
+
+    @staticmethod
+    def is_transient_db_error(exc: Exception) -> bool:
+        return isinstance(exc, (OperationalError, InterfaceError))
 
 
 class FakeThread:
@@ -93,6 +112,8 @@ def build_request(fake_db: FakeDB, max_batches: int = 32) -> SimpleNamespace:
         db_pool_maxconn=20,
         stale_running_job_minutes=30,
         max_batches=max_batches,
+        invoice_debug_logs=False,
+        invoice_debug_body_limit=300,
     )
     app = SimpleNamespace(state=SimpleNamespace(db=fake_db, settings=settings))
     return SimpleNamespace(app=app)
@@ -171,6 +192,26 @@ def test_create_job_inserts_job_and_starts_thread(monkeypatch: pytest.MonkeyPatc
     assert thread.args[0] == "11111111-1111-1111-1111-111111111111"
 
 
+def test_create_job_returns_503_on_transient_db_error():
+    transient_error = OperationalError("could not receive data from server: Operation timed out")
+    cursor = FakeCursor(execute_exception=transient_error)
+    conn = FakeConn(cursor, rollback_exception=InterfaceError("connection already closed"))
+    db = FakeDB(conn)
+    request = build_request(db)
+    payload = JobCreateRequest(
+        phrases=["A"],
+        batches=1,
+        invoices=["100"],
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        create_job(payload, request)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "database_unavailable"
+    assert db.safe_rollback_count == 1
+
+
 def test_create_job_rejects_batches_above_configured_cap(monkeypatch: pytest.MonkeyPatch):
     from app import main
 
@@ -217,6 +258,21 @@ def test_cancel_job_is_idempotent_for_finished_job():
     assert response.status == "finished"
     assert conn.commit_count == 1
     assert len(cursor.executed) == 1
+
+
+def test_cancel_job_returns_503_on_transient_db_error():
+    transient_error = OperationalError("could not receive data from server: Operation timed out")
+    cursor = FakeCursor(execute_exception=transient_error)
+    conn = FakeConn(cursor, rollback_exception=InterfaceError("connection already closed"))
+    db = FakeDB(conn)
+    request = build_request(db)
+
+    with pytest.raises(HTTPException) as exc:
+        cancel_job("job-1", request)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "database_unavailable"
+    assert db.safe_rollback_count == 1
 
 
 def test_get_job_returns_status_and_counters():
@@ -325,4 +381,3 @@ def test_get_job_results_returns_rows_when_canceled():
     assert len(response["results"]) == 2
     assert response["results"][0]["matched_phrases"] == ["token"]
     assert response["results"][1]["last_error"] == "canceled_by_user"
-

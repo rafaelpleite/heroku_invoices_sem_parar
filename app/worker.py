@@ -2,7 +2,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 
 from app.config import Settings
 from app.db import Database
@@ -116,6 +116,8 @@ def process_batch(
             max_attempts=3,
             logger=logger,
             log_context=f"job_id={job_id} batch_id={batch_id}",
+            debug_logs=settings.invoice_debug_logs,
+            debug_body_limit=settings.invoice_debug_body_limit,
         )
         result["attempts"] = max(db_attempts, int(result.get("attempts", db_attempts)))
 
@@ -134,12 +136,18 @@ def process_batch(
             continue
 
         logger.info(
-            "job_id=%s batch_id=%s invoice_id=%s event=invoice_processing_finished status=%s result_label=%s",
+            (
+                "job_id=%s batch_id=%s invoice_id=%s event=invoice_processing_finished "
+                "status=%s result_label=%s error_code=%s pdf_url_present=%s last_error=%s"
+            ),
             job_id,
             batch_id,
             invoice_id,
             result["status"],
             result["result_label"],
+            result.get("error_code"),
+            bool(result.get("pdf_url")),
+            result.get("last_error"),
         )
 
     logger.info("job_id=%s batch_id=%s event=process_batch_finished", job_id, batch_id)
@@ -159,7 +167,7 @@ def _mark_job_started(job_id: str, db: Database) -> None:
                 cur.execute(SET_JOB_STARTED_SQL, (job_id,))
             conn.commit()
         except Exception:
-            conn.rollback()
+            db.safe_rollback(conn)
             raise
 
 
@@ -172,7 +180,7 @@ def _claim_next_invoice(job_id: str, batch_id: int, db: Database) -> dict[str, A
             conn.commit()
             return row
         except Exception:
-            conn.rollback()
+            db.safe_rollback(conn)
             raise
 
 
@@ -183,11 +191,14 @@ def _mark_invoice_canceled(invoice_row_id: int, db: Database) -> None:
                 cur.execute(MARK_INVOICE_CANCELED_SQL, (invoice_row_id,))
             conn.commit()
         except Exception:
-            conn.rollback()
+            db.safe_rollback(conn)
             raise
 
 
 def _update_invoice_result(invoice_row_id: int, result: dict[str, Any], db: Database) -> bool:
+    matched_phrases = result.get("matched_phrases")
+    matched_phrases_param = None if matched_phrases is None else Json(matched_phrases)
+
     with db.get_conn() as conn:
         try:
             with conn.cursor() as cur:
@@ -199,7 +210,7 @@ def _update_invoice_result(invoice_row_id: int, result: dict[str, Any], db: Data
                         result["result_label"],
                         result["error_code"],
                         int(result.get("attempts", 1)),
-                        result.get("matched_phrases"),
+                        matched_phrases_param,
                         result.get("pdf_url"),
                         result.get("last_error"),
                         invoice_row_id,
@@ -209,7 +220,7 @@ def _update_invoice_result(invoice_row_id: int, result: dict[str, Any], db: Data
             conn.commit()
             return updated
         except Exception:
-            conn.rollback()
+            db.safe_rollback(conn)
             raise
 
 
@@ -220,7 +231,7 @@ def _mark_remaining_worker_error(job_id: str, db: Database) -> None:
                 cur.execute(MARK_REMAINING_WORKER_ERROR_SQL, (job_id,))
             conn.commit()
         except Exception:
-            conn.rollback()
+            db.safe_rollback(conn)
             raise
 
 
@@ -255,7 +266,7 @@ def _finalize_job(job_id: str, db: Database) -> None:
                     cur.execute(FINALIZE_JOB_FINISHED_SQL, (job_id,))
             conn.commit()
         except Exception:
-            conn.rollback()
+            db.safe_rollback(conn)
             raise
 
 
@@ -266,5 +277,5 @@ def _force_job_error(job_id: str, db: Database, error_message: str) -> None:
                 cur.execute(FORCE_JOB_ERROR_SQL, (error_message, job_id))
             conn.commit()
         except Exception:
-            conn.rollback()
+            db.safe_rollback(conn)
             raise

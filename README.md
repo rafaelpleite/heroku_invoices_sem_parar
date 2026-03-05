@@ -27,10 +27,15 @@ Edit `.env` with your values:
 - `STALE_RUNNING_JOB_MINUTES` (optional, defaults to `30`)
 - `MAX_BATCHES` (optional, defaults to `32`)
 
+Accepted `DATABASE_URL` formats:
+- `postgresql://...` (canonical)
+- `postgresql+psycopg2://...` (auto-normalized)
+- `postgres://...` (auto-normalized)
+
 ## Run
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8010
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
 ```
 
 On startup, schema and indexes are created automatically if they do not exist.
@@ -111,3 +116,14 @@ Returns final status (`canceled` if the job was running).
 - Workers are in-process.
 - On startup, stale jobs that were `running` longer than `STALE_RUNNING_JOB_MINUTES` are reconciled to `error` (with invoice rows marked as worker error).
 - The service does not migrate legacy `public.jobs`/`public.job_invoices` data. Existing `public` tables are left untouched.
+
+## Troubleshooting
+
+- Error similar to `invalid dsn: missing "=" after "postgresql+psycopg2://..."`:
+  - Keep using your existing URL if desired; the app now normalizes this format automatically.
+  - If you still see it, confirm the server is running the current code and run with venv Python:
+    - `python -m uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload`
+- Systematic `erro_401` on all invoices:
+  - This upstream endpoint expects `TOKEN` header auth, not Bearer auth.
+  - Validate your token directly:
+    - `curl --insecure -X GET "https://semparar-production.herokuapp.com/api/v1/invoices/2640312487" -H "TOKEN: $HEROKU_API_KEY"`

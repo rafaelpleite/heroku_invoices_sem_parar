@@ -41,3 +41,11 @@ def test_sql_has_no_unqualified_jobs_or_job_invoices_table_references() -> None:
     for pattern in disallowed_patterns:
         assert re.search(pattern, all_sql, flags=re.IGNORECASE) is None
 
+
+def test_sql_has_no_schema_qualified_index_name_with_if_not_exists() -> None:
+    all_sql = _all_sql_text()
+    assert re.search(r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+heroku\.", all_sql, re.IGNORECASE) is None
+    assert (
+        re.search(r"CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+heroku\.", all_sql, re.IGNORECASE)
+        is None
+    )

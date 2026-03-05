@@ -6,10 +6,19 @@ from app import invoice_search
 
 
 class DummyResponse:
-    def __init__(self, status_code: int, payload: dict | None = None, content: bytes = b""):
+    def __init__(
+        self,
+        status_code: int,
+        payload: dict | None = None,
+        content: bytes = b"",
+        headers: dict | None = None,
+        text: str | None = None,
+    ):
         self.status_code = status_code
         self._payload = payload or {}
         self.content = content
+        self.headers = headers or {}
+        self.text = text if text is not None else ""
 
     def json(self) -> dict:
         return self._payload
@@ -33,6 +42,30 @@ def test_pdf_to_text_success_with_single_page() -> None:
 
 def test_pdf_to_text_returns_empty_on_failure() -> None:
     assert invoice_search.pdf_to_text(b"invalid-pdf", max_pages=1) == ""
+
+
+def test_request_invoice_api_uses_token_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake_get(url: str, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return DummyResponse(200, {"url": "https://example.com/invoice.pdf"})
+
+    monkeypatch.setattr(invoice_search.requests, "get", fake_get)
+
+    response = invoice_search.request_invoice_api(
+        invoice_id="2640312487",
+        base_url="https://semparar-production.herokuapp.com/api/v1/invoices/",
+        api_key="secret-token",
+        timeout=13,
+    )
+
+    assert isinstance(response, DummyResponse)
+    assert captured["url"] == "https://semparar-production.herokuapp.com/api/v1/invoices/2640312487"
+    assert captured["kwargs"]["headers"] == {"TOKEN": "secret-token"}
+    assert captured["kwargs"]["timeout"] == 13
+    assert captured["kwargs"]["verify"] is False
 
 
 def test_buscar_fatura_found_phrase(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,16 +169,14 @@ def test_buscar_fatura_retryable_http_exhausted(monkeypatch: pytest.MonkeyPatch)
         max_attempts=3,
     )
 
-    assert result == {
-        "status": "error",
-        "found": None,
-        "result_label": "erro_401",
-        "error_code": 401,
-        "matched_phrases": None,
-        "pdf_url": None,
-        "last_error": "invoice_api_http_error_401",
-        "attempts": 3,
-    }
+    assert result["status"] == "error"
+    assert result["found"] is None
+    assert result["result_label"] == "erro_401"
+    assert result["error_code"] == 401
+    assert result["matched_phrases"] is None
+    assert result["pdf_url"] is None
+    assert result["attempts"] == 3
+    assert result["last_error"].startswith("invoice_api_http_error_401")
 
 
 def test_buscar_fatura_network_then_success(monkeypatch: pytest.MonkeyPatch) -> None:

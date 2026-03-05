@@ -1,10 +1,14 @@
+import logging
 from contextlib import contextmanager
 from typing import Generator
 
+from psycopg2 import InterfaceError, OperationalError
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 
 from app.sql import MARK_STALE_JOB_INVOICES_SQL, MARK_STALE_RUNNING_JOBS_SQL, SCHEMA_STATEMENTS
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -17,11 +21,22 @@ class Database:
     def init_pool(self) -> None:
         if self._pool is not None:
             return
-        self._pool = ThreadedConnectionPool(
-            minconn=self._minconn,
-            maxconn=self._maxconn,
-            dsn=self._dsn,
-        )
+        try:
+            self._pool = ThreadedConnectionPool(
+                minconn=self._minconn,
+                maxconn=self._maxconn,
+                dsn=self._dsn,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=3,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to initialize Postgres connection pool. "
+                "Check DATABASE_URL format and credentials. Accepted URL formats: "
+                "postgresql://..., postgresql+psycopg2://..., postgres://..."
+            ) from exc
 
     def close(self) -> None:
         if self._pool is None:
@@ -37,7 +52,20 @@ class Database:
         try:
             yield conn
         finally:
-            self._pool.putconn(conn)
+            if getattr(conn, "closed", 1):
+                self._pool.putconn(conn, close=True)
+            else:
+                self._pool.putconn(conn)
+
+    def safe_rollback(self, conn) -> None:
+        try:
+            conn.rollback()
+        except Exception as exc:  # never mask the original failure in cleanup path
+            logger.warning("event=safe_rollback_skipped error=%s", exc)
+
+    @staticmethod
+    def is_transient_db_error(exc: Exception) -> bool:
+        return isinstance(exc, (OperationalError, InterfaceError))
 
     def init_schema(self) -> None:
         with self.get_conn() as conn:
@@ -47,7 +75,7 @@ class Database:
                         cur.execute(stmt)
                 conn.commit()
             except Exception:
-                conn.rollback()
+                self.safe_rollback(conn)
                 raise
 
     def reconcile_stale_running_jobs(self, stale_minutes: int) -> int:
@@ -63,5 +91,5 @@ class Database:
                 conn.commit()
                 return len(stale_job_ids)
             except Exception:
-                conn.rollback()
+                self.safe_rollback(conn)
                 raise

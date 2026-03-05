@@ -11,6 +11,7 @@ from psycopg2.extras import Json, RealDictCursor, execute_values
 
 from app.config import Settings, load_settings
 from app.db import Database
+from app.invoice_search import mask_api_key
 from app.sql import (
     CANCEL_JOB_INVOICES_SQL,
     CANCEL_JOB_SQL,
@@ -90,6 +91,17 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.db = db
     logger.info("event=app_started stale_jobs_marked_error=%s", stale_jobs_count)
+    logger.debug(
+        (
+            "event=startup_config invoice_api_base_url=%s has_heroku_api_key=%s "
+            "heroku_api_key_mask=%s invoice_debug_logs=%s invoice_debug_body_limit=%s"
+        ),
+        settings.invoice_api_base_url,
+        bool(settings.heroku_api_key),
+        mask_api_key(settings.heroku_api_key),
+        settings.invoice_debug_logs,
+        settings.invoice_debug_body_limit,
+    )
     try:
         yield
     finally:
@@ -136,11 +148,17 @@ def create_job(payload: JobCreateRequest, request: Request) -> JobCreateResponse
                 )
             conn.commit()
         except Exception as exc:
-            conn.rollback()
+            db.safe_rollback(conn)
             if getattr(exc, "pgcode", None) == errorcodes.UNIQUE_VIOLATION:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="duplicate_invoice_id_in_job",
+                ) from exc
+            if db.is_transient_db_error(exc):
+                logger.exception("job_id=%s event=create_job_transient_db_error", job_id)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="database_unavailable",
                 ) from exc
             logger.exception("job_id=%s event=create_job_failed", job_id)
             raise
@@ -181,10 +199,16 @@ def cancel_job(job_id: str, request: Request) -> JobCancelResponse:
 
             conn.commit()
         except HTTPException:
-            conn.rollback()
+            db.safe_rollback(conn)
             raise
-        except Exception:
-            conn.rollback()
+        except Exception as exc:
+            db.safe_rollback(conn)
+            if db.is_transient_db_error(exc):
+                logger.exception("job_id=%s event=cancel_job_transient_db_error", job_id)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="database_unavailable",
+                ) from exc
             logger.exception("job_id=%s event=cancel_job_failed", job_id)
             raise
 

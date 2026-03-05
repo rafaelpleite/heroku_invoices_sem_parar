@@ -45,10 +45,10 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE heroku.job_invoices ADD COLUMN IF NOT EXISTS matched_phrases JSONB NULL",
     "ALTER TABLE heroku.job_invoices ADD COLUMN IF NOT EXISTS pdf_url TEXT NULL",
     "ALTER TABLE heroku.job_invoices ADD COLUMN IF NOT EXISTS last_error TEXT NULL",
-    "CREATE INDEX IF NOT EXISTS heroku.idx_job_invoices_job_id ON heroku.job_invoices(job_id)",
-    "CREATE INDEX IF NOT EXISTS heroku.idx_job_invoices_job_batch ON heroku.job_invoices(job_id, batch_id)",
-    "CREATE INDEX IF NOT EXISTS heroku.idx_job_invoices_job_status ON heroku.job_invoices(job_id, status)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS heroku.ux_job_invoices_job_invoice ON heroku.job_invoices(job_id, invoice_id)",
+    "CREATE INDEX IF NOT EXISTS idx_job_invoices_job_id ON heroku.job_invoices(job_id)",
+    "CREATE INDEX IF NOT EXISTS idx_job_invoices_job_batch ON heroku.job_invoices(job_id, batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_job_invoices_job_status ON heroku.job_invoices(job_id, status)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_job_invoices_job_invoice ON heroku.job_invoices(job_id, invoice_id)",
 ]
 
 INSERT_JOB_SQL = """
